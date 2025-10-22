@@ -1,0 +1,275 @@
+<!--
+ASANAS REFERENCE SITE - index.html
+
+How to use:
+1. This single file is a ready-to-run static site. It fetches your published CSV link (already set below)
+   and displays asanas in a searchable, filterable card grid.
+2. To run locally: open this file in a browser (CORS may block fetch locally in some browsers).
+   If fetch fails locally, push to GitHub and serve via GitHub Pages (instructions below).
+3. To deploy on GitHub Pages:
+   - Create a new repo on GitHub and upload this file as index.html in the repository root.
+   - In repo Settings -> Pages, set branch to main and root folder. Your site will be available at https://<username>.github.io/<repo>/
+
+Customization:
+- Replace CSV_URL below if you publish a different sheet.
+- The script will automatically detect header names. It looks for columns named (case-insensitive):
+  "name", "asana", "title" -> used as the card title
+  "difficulty", "level" -> used as difficulty filter
+  "category", "type" -> used as category filter
+  "image", "image link", "image_url", "img" -> used as card image
+  Any other columns are shown as details on the card.
+
+This file uses Tailwind Play CDN for quick styling and PapaParse CDN to safely parse CSV.
+-->
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Asanas Reference</title>
+  <!-- Tailwind Play CDN (good for prototypes / student projects) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- PapaParse for robust CSV parsing -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+</head>
+<body class="bg-slate-50 text-slate-900">
+  <header class="bg-white shadow-sm">
+    <div class="max-w-6xl mx-auto p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+      <h1 class="text-2xl font-semibold">Asanas Reference</h1>
+      <p class="text-sm text-slate-600">Live from your Google Sheet — teachers' quick reference</p>
+      <div class="w-full md:w-1/3 flex gap-2">
+        <input id="search" placeholder="Search by name, benefits, notes..." class="flex-1 border rounded-md p-2" />
+        <button id="clearBtn" class="px-3 py-2 border rounded-md">Clear</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-6xl mx-auto p-4">
+    <section class="mb-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+      <div class="flex gap-3">
+        <label class="flex items-center gap-2 text-sm">
+          <span>Difficulty</span>
+          <select id="filterDifficulty" class="border rounded-md p-2">
+            <option value="">All</option>
+          </select>
+        </label>
+        <label class="flex items-center gap-2 text-sm">
+          <span>Category</span>
+          <select id="filterCategory" class="border rounded-md p-2">
+            <option value="">All</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="flex items-center gap-3">
+        <label class="text-sm flex items-center gap-2">Sort:
+          <select id="sortSelect" class="border rounded-md p-2">
+            <option value="name_asc">Name ↑</option>
+            <option value="name_desc">Name ↓</option>
+          </select>
+        </label>
+        <button id="downloadJson" class="px-3 py-2 border rounded-md text-sm">Download JSON</button>
+      </div>
+    </section>
+
+    <section id="cards" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"></section>
+
+    <div id="status" class="text-sm text-slate-600 mt-6"></div>
+  </main>
+
+  <footer class="max-w-6xl mx-auto p-4 text-xs text-slate-500">
+    Built for a college project — free to host on GitHub Pages. CSV published from your Google Sheet is used as the data source.
+  </footer>
+
+<script>
+// ============= CONFIG =============
+const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vT985WajQ8MUYHrxHvhRWXd-w-jhIUXq8yP7JQ3rG48icgIdylW7fbpjxB97vUk4Vh7-3LW658pR3ey/pub?output=csv';
+// ==================================
+
+const statusEl = document.getElementById('status');
+const cardsEl = document.getElementById('cards');
+const searchEl = document.getElementById('search');
+const filterDifficulty = document.getElementById('filterDifficulty');
+const filterCategory = document.getElementById('filterCategory');
+const sortSelect = document.getElementById('sortSelect');
+const clearBtn = document.getElementById('clearBtn');
+const downloadJson = document.getElementById('downloadJson');
+
+let allRows = [];
+let headers = [];
+
+function setStatus(msg) { statusEl.textContent = msg; }
+
+function normalizeHeader(h) { return h.trim().toLowerCase(); }
+
+function bestTitleKey(hdrs) {
+  const prefs = ['name','asana','title'];
+  for (const p of prefs) {
+    const idx = hdrs.findIndex(h => normalizeHeader(h) === p);
+    if (idx !== -1) return idx;
+  }
+  return 0;
+}
+
+function findKeyIndex(hdrs, candidates) {
+  for (const c of candidates) {
+    const idx = hdrs.findIndex(h => normalizeHeader(h) === c);
+    if (idx !== -1) return idx;
+  }
+  return -1;
+}
+
+function createOption(selectEl, value) {
+  const opt = document.createElement('option');
+  opt.value = value;
+  opt.textContent = value;
+  selectEl.appendChild(opt);
+}
+
+function renderCards(rows) {
+  cardsEl.innerHTML = '';
+  if (!rows.length) {
+    cardsEl.innerHTML = '<div class="col-span-full text-center text-slate-500">No asanas match your filters.</div>';
+    return;
+  }
+
+  const titleIdx = bestTitleKey(headers);
+  const imgIdx = findKeyIndex(headers, ['image','image link','image_url','img','photo','imageurl']);
+  const diffIdx = findKeyIndex(headers, ['difficulty','level']);
+
+  rows.forEach(row => {
+    const title = row[titleIdx] || '—';
+    const img = imgIdx !== -1 ? row[imgIdx] : '';
+
+    const card = document.createElement('article');
+    card.className = 'bg-white rounded-2xl p-4 shadow-sm hover:shadow-md transition';
+
+    let imgHtml = '';
+    if (img) {
+      imgHtml = `<div class="h-40 w-full bg-gray-100 rounded-lg mb-3 overflow-hidden flex items-center justify-center">` +
+                `<img src="${img}" alt="${title}" class="object-contain h-full" onerror="this.style.display='none'"/>` +
+                `</div>`;
+    }
+
+    let detailsHtml = '';
+    headers.forEach((h, i) => {
+      const val = row[i];
+      if (!val) return;
+      const normalized = normalizeHeader(h);
+      if (i === titleIdx) return; // title shown separately
+      if (i === imgIdx) return;
+      detailsHtml += `<div class="text-sm"><strong class='capitalize'>${h}:</strong> ${val}</div>`;
+    });
+
+    card.innerHTML = `
+      ${imgHtml}
+      <h3 class="text-lg font-semibold mb-1">${title}</h3>
+      <div class="mb-2 text-sm text-slate-500">${diffIdx !== -1 ? (row[diffIdx] || '') : ''}</div>
+      <div class="space-y-1">${detailsHtml}</div>
+    `;
+
+    cardsEl.appendChild(card);
+  });
+}
+
+function applyFiltersAndRender() {
+  const q = searchEl.value.trim().toLowerCase();
+  const diff = filterDifficulty.value;
+  const cat = filterCategory.value;
+
+  let rows = allRows.slice();
+
+  if (diff) {
+    const diffIdx = findKeyIndex(headers, ['difficulty','level']);
+    if (diffIdx !== -1) rows = rows.filter(r => (r[diffIdx] || '').toLowerCase() === diff.toLowerCase());
+  }
+  if (cat) {
+    const catIdx = findKeyIndex(headers, ['category','type']);
+    if (catIdx !== -1) rows = rows.filter(r => (r[catIdx] || '').toLowerCase() === cat.toLowerCase());
+  }
+
+  if (q) {
+    rows = rows.filter(row => row.join(' ').toLowerCase().includes(q));
+  }
+
+  const sortVal = sortSelect.value;
+  const titleIdx = bestTitleKey(headers);
+  rows.sort((a,b) => {
+    const A = (a[titleIdx]||'').toLowerCase();
+    const B = (b[titleIdx]||'').toLowerCase();
+    if (sortVal === 'name_asc') return A.localeCompare(B);
+    return B.localeCompare(A);
+  });
+
+  renderCards(rows);
+}
+
+function downloadJSON(rows) {
+  const objs = rows.map(r => {
+    const o = {};
+    headers.forEach((h,i) => o[h] = r[i] || '');
+    return o;
+  });
+  const blob = new Blob([JSON.stringify(objs, null, 2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'asanas.json'; a.click();
+  URL.revokeObjectURL(url);
+}
+
+function populateFilters(rows) {
+  // difficulty
+  const diffIdx = findKeyIndex(headers, ['difficulty','level']);
+  const catIdx = findKeyIndex(headers, ['category','type']);
+  const diffs = new Set();
+  const cats = new Set();
+  rows.forEach(r => {
+    if (diffIdx !== -1) diffs.add((r[diffIdx] || '').trim());
+    if (catIdx !== -1) cats.add((r[catIdx] || '').trim());
+  });
+  // clear existing except first All
+  filterDifficulty.querySelectorAll('option:not(:first-child)').forEach(n => n.remove());
+  filterCategory.querySelectorAll('option:not(:first-child)').forEach(n => n.remove());
+  Array.from(diffs).filter(x=>x).sort().forEach(x => createOption(filterDifficulty, x));
+  Array.from(cats).filter(x=>x).sort().forEach(x => createOption(filterCategory, x));
+}
+
+function fetchAndLoad() {
+  setStatus('Loading data from your Google Sheet...');
+  Papa.parse(CSV_URL, {
+    download: true,
+    skipEmptyLines: true,
+    complete: function(results) {
+      if (results.errors && results.errors.length) {
+        console.error('CSV parse errors', results.errors);
+      }
+      const data = results.data;
+      if (!data || !data.length) { setStatus('No data found in the sheet.'); return; }
+      headers = data[0].map(h => h.trim());
+      allRows = data.slice(1).map(r => r.map(c => c.trim()));
+      setStatus(`${allRows.length} rows loaded.`);
+      populateFilters(allRows);
+      applyFiltersAndRender();
+    },
+    error: function(err) {
+      console.error(err);
+      setStatus('Failed to load CSV (CORS or wrong link). Make sure the sheet is "Publish to web" and the link is a pub?output=csv URL.');
+    }
+  });
+}
+
+// EVENTS
+searchEl.addEventListener('input', () => applyFiltersAndRender());
+filterDifficulty.addEventListener('change', () => applyFiltersAndRender());
+filterCategory.addEventListener('change', () => applyFiltersAndRender());
+sortSelect.addEventListener('change', () => applyFiltersAndRender());
+clearBtn.addEventListener('click', ()=>{ searchEl.value=''; filterDifficulty.value=''; filterCategory.value=''; sortSelect.value='name_asc'; applyFiltersAndRender(); });
+downloadJson.addEventListener('click', ()=> downloadJSON(allRows));
+
+// start
+fetchAndLoad();
+
+</script>
+</body>
+</html>
