@@ -173,31 +173,81 @@ function renderCards(rows) {
   });
 }
 
+function populateFilters(rows) {
+  // difficulty
+  const diffIdx = findKeyIndex(headers, ['difficulty','level']);
+  const catIdx = findKeyIndex(headers, ['category','type']);
+
+  // Use maps keyed by normalized value -> display string to avoid duplicates with different case/spacing
+  const diffMap = new Map();
+  const catMap = new Map();
+
+  function norm(v){ return (v||'').toString().trim().toLowerCase(); }
+
+  rows.forEach(r => {
+    if (diffIdx !== -1) {
+      const raw = (r[diffIdx] || '').toString().trim();
+      const key = norm(raw);
+      if (key) diffMap.set(key, raw);
+    }
+    if (catIdx !== -1) {
+      const raw = (r[catIdx] || '').toString().trim();
+      const key = norm(raw);
+      if (key) catMap.set(key, raw);
+    }
+  });
+
+  // clear existing except first All
+  filterDifficulty.querySelectorAll('option:not(:first-child)').forEach(n => n.remove());
+  filterCategory.querySelectorAll('option:not(:first-child)').forEach(n => n.remove());
+
+  // sort by display text and create options where value is the normalized key but text is the original
+  Array.from(diffMap.entries())
+    .sort((a,b) => a[1].localeCompare(b[1]))
+    .forEach(([key, display]) => {
+      const opt = document.createElement('option');
+      opt.value = key;
+      opt.textContent = display;
+      filterDifficulty.appendChild(opt);
+    });
+
+  Array.from(catMap.entries())
+    .sort((a,b) => a[1].localeCompare(b[1]))
+    .forEach(([key, display]) => {
+      const opt = document.createElement('option');
+      opt.value = key;
+      opt.textContent = display;
+      filterCategory.appendChild(opt);
+    });
+}
+
 function applyFiltersAndRender() {
-  const q = searchEl.value.trim().toLowerCase();
+  const q = (searchEl.value || '').toString().trim().toLowerCase();
   const diff = filterDifficulty.value;
   const cat = filterCategory.value;
+
+  const norm = v => (v||'').toString().trim().toLowerCase();
 
   let rows = allRows.slice();
 
   if (diff) {
     const diffIdx = findKeyIndex(headers, ['difficulty','level']);
-    if (diffIdx !== -1) rows = rows.filter(r => (r[diffIdx] || '').toLowerCase() === diff.toLowerCase());
+    if (diffIdx !== -1) rows = rows.filter(r => norm(r[diffIdx]) === diff);
   }
   if (cat) {
     const catIdx = findKeyIndex(headers, ['category','type']);
-    if (catIdx !== -1) rows = rows.filter(r => (r[catIdx] || '').toLowerCase() === cat.toLowerCase());
+    if (catIdx !== -1) rows = rows.filter(r => norm(r[catIdx]) === cat);
   }
 
   if (q) {
-    rows = rows.filter(row => row.join(' ').toLowerCase().includes(q));
+    rows = rows.filter(row => norm(row.join(' ')).includes(q));
   }
 
   const sortVal = sortSelect.value;
   const titleIdx = bestTitleKey(headers);
   rows.sort((a,b) => {
-    const A = (a[titleIdx]||'').toLowerCase();
-    const B = (b[titleIdx]||'').toLowerCase();
+    const A = norm(a[titleIdx] || '');
+    const B = norm(b[titleIdx] || '');
     if (sortVal === 'name_asc') return A.localeCompare(B);
     return B.localeCompare(A);
   });
@@ -218,45 +268,32 @@ function downloadJSON(rows) {
   URL.revokeObjectURL(url);
 }
 
-function populateFilters(rows) {
-  // difficulty
-  const diffIdx = findKeyIndex(headers, ['difficulty','level']);
-  const catIdx = findKeyIndex(headers, ['category','type']);
-  const diffs = new Set();
-  const cats = new Set();
-  rows.forEach(r => {
-    if (diffIdx !== -1) diffs.add((r[diffIdx] || '').trim());
-    if (catIdx !== -1) cats.add((r[catIdx] || '').trim());
-  });
-  // clear existing except first All
-  filterDifficulty.querySelectorAll('option:not(:first-child)').forEach(n => n.remove());
-  filterCategory.querySelectorAll('option:not(:first-child)').forEach(n => n.remove());
-  Array.from(diffs).filter(x=>x).sort().forEach(x => createOption(filterDifficulty, x));
-  Array.from(cats).filter(x=>x).sort().forEach(x => createOption(filterCategory, x));
-}
-
-function fetchAndLoad() {
-  setStatus('Loading data from your Google Sheet...');
-  Papa.parse(CSV_URL, {
-    download: true,
-    skipEmptyLines: true,
-    complete: function(results) {
-      if (results.errors && results.errors.length) {
-        console.error('CSV parse errors', results.errors);
-      }
-      const data = results.data;
-      if (!data || !data.length) { setStatus('No data found in the sheet.'); return; }
-      headers = data[0].map(h => h.trim());
-      allRows = data.slice(1).map(r => r.map(c => c.trim()));
-      setStatus(`${allRows.length} rows loaded.`);
-      populateFilters(allRows);
-      applyFiltersAndRender();
-    },
-    error: function(err) {
-      console.error(err);
-      setStatus('Failed to load CSV (CORS or wrong link). Make sure the sheet is "Publish to web" and the link is a pub?output=csv URL.');
+async function fetchAndLoad() {
+  setStatus('Loading CSV...');
+  try {
+    const res = await fetch(CSV_URL);
+    if (!res.ok) throw new Error(`HTTP ${res.status} - ${res.statusText}`);
+    const text = await res.text();
+    const parsed = Papa.parse(text, { skipEmptyLines: true });
+    if (!parsed || !parsed.data || parsed.data.length === 0) {
+      setStatus('CSV parsed but contains no rows.');
+      return;
     }
-  });
+
+    // first row is headers
+    headers = parsed.data[0].map(h => (h || '').toString());
+    // normalize rows to same length as headers
+    allRows = parsed.data.slice(1).map(row =>
+      headers.map((_, i) => (row[i] != null ? row[i].toString() : ''))
+    );
+
+    populateFilters(allRows);
+    applyFiltersAndRender();
+    setStatus(`Loaded ${allRows.length} rows`);
+  } catch (err) {
+    console.error(err);
+    setStatus('Failed to load CSV. Check console. If page opened with file://, run a local server or publish the sheet.');
+  }
 }
 
 // EVENTS
